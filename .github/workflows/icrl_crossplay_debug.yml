@@ -1,0 +1,52 @@
+name: ICRL4AHT Crossplay Debug
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/icrl_crossplay_debug.yml
+permissions:
+  contents: read
+jobs:
+  crossplay_debug:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install pinned CPU dependencies
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path("pyproject.toml")
+          s=p.read_text()
+          assert s.count('"jax[cuda12]==0.5.3"')==1
+          p.write_text(s.replace('"jax[cuda12]==0.5.3"','"jax==0.5.3"'))
+          PY
+          python -m pip install -e .
+      - name: Smoke test custom crossplay extension only
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          python scripts/round8_static_crossplay.py --layouts demo_cook_simple --partners territory --ego utility_greedy --seeds 0 --tasks-per-cell 1 --episodes 1 --max-steps 100 --out results_crossplay_debug.csv 2>&1 | tee logs/crossplay_debug.log
+          python - <<'PY'
+          import csv
+          rows=list(csv.DictReader(open("results_crossplay_debug.csv")))
+          assert len(rows)==1, len(rows)
+          print(rows)
+          PY
+      - name: Save diagnostic data even after failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossplay-debug-logs
+          path: |
+            logs/**
+            results_crossplay_debug.csv
+          if-no-files-found: warn
