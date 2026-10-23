@@ -1,0 +1,98 @@
+name: ICRL4AHT Round8 Crossplay Full
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/icrl_round8_crossplay_full.yml
+permissions:
+  contents: read
+jobs:
+  heuristic_crossplay:
+    name: Crossplay - ${{ matrix.layout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [demo_cook_simple, grounded_coord_ring]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 100
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install pinned CPU-only project dependencies
+        run: |
+          mkdir -p logs
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("pyproject.toml")
+          content = p.read_text()
+          cuda = '"jax[cuda12]==0.5.3"'
+          assert content.count(cuda) == 1, 'Unexpected official JAX dependency'
+          p.write_text(content.replace(cuda, '"jax==0.5.3"'))
+          PY
+          set -o pipefail
+          python -m pip install -e . 2>&1 | tee logs/install.log
+          python -m pip freeze > logs/freeze.txt
+      - name: Run two static ego policies against four benchmark partner families
+        run: |
+          set -o pipefail
+          python scripts/round8_static_crossplay.py \
+            --layouts "${{ matrix.layout }}" \
+            --partners assembly_line,territory,utility_greedy,recipe_aware_button \
+            --ego utility_greedy,recipe_aware_button \
+            --seeds 0,1 \
+            --tasks-per-cell 2 \
+            --episodes 3 \
+            --max-steps 100 \
+            --out results/crossplay_${{ matrix.layout }}.csv \
+            2>&1 | tee logs/crossplay.log
+      - name: Require complete coverage and create machine-readable summary
+        run: |
+          python - <<'PY'
+          import csv, json, math, collections
+          from pathlib import Path
+          layout = "${{ matrix.layout }}"
+          f = Path("results") / f"crossplay_{layout}.csv"
+          rows = list(csv.DictReader(f.open(newline="")))
+          expected = 4 * 2 * 2 * 2 * 3
+          assert len(rows) == expected, (len(rows), expected)
+          assert {r['layout'] for r in rows} == {layout}
+          assert {r['ego_family'] for r in rows} == {'utility_greedy','recipe_aware_button'}
+          assert {r['partner_family'] for r in rows} == {'assembly_line','territory','utility_greedy','recipe_aware_button'}
+          assert {r['seed'] for r in rows} == {'0','1'}
+          assert {r['episode'] for r in rows} == {'0','1','2'}
+          assert all(math.isfinite(float(r['return'])) and 0 < int(r['steps']) <= 100 for r in rows)
+          keys = collections.defaultdict(list)
+          ids = set()
+          for r in rows:
+              uid = (r['task_id'], r['ego_family'], r['seed'], r['episode'])
+              assert uid not in ids, f"Duplicate episode: {uid}"
+              ids.add(uid)
+              keys[(r['partner_family'],r['ego_family'])].append(float(r['return']))
+          assert len(keys) == 8
+          assert all(len(v) == 12 for v in keys.values()), {k: len(v) for k,v in keys.items()}
+          result = [dict(layout=layout,partner_family=k[0],ego_family=k[1],n=len(v),
+                         mean_return=sum(v)/len(v),positive_return_rate=sum(x>0 for x in v)/len(v))
+                    for k,v in sorted(keys.items())]
+          p = Path("results") / f"summary_{layout}.json"
+          p.write_text(json.dumps(result,indent=2),encoding="utf-8")
+          print("STRICT COVERAGE VALIDATED",len(rows),"episodes")
+          print(json.dumps(result,indent=2))
+          PY
+      - name: Persist results and debugging artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossplay-${{ matrix.layout }}
+          path: |
+            logs/**
+            results/**
+          if-no-files-found: warn
