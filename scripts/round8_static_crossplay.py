@@ -16,6 +16,10 @@ import jax
 import jax.numpy as jnp
 
 from benchmarks.manifest_schema import load_manifest
+# Running as python scripts/<name>.py places scripts/ first on sys.path;
+# explicitly add the checked-out repository root for the top-level eval module.
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eval_icrl import create_env_for_task, create_teammate, get_manifest_path
 from teammate_wrapper import make_teammate
 from teammate_wrapper.specs import HeuristicTeammateSpec
