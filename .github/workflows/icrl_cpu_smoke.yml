@@ -1,0 +1,99 @@
+name: ICRL4AHT CPU Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/icrl_cpu_smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  official_random_smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+      - name: Install Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Switch pinned JAX dependency to CPU
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("pyproject.toml")
+          raw = p.read_text()
+          old = '"jax[cuda12]==0.5.3"'
+          new = '"jax==0.5.3"'
+          if raw.count(old) != 1:
+              raise RuntimeError('Unexpected JAX pin; inspect upstream pyproject.toml')
+          p.write_text(raw.replace(old, new))
+          print('Changed JAX CUDA extra only; original repository unchanged')
+          PY
+      - name: Install project dependencies
+        run: |
+          mkdir -p logs
+          python -m pip install --upgrade pip
+          set -o pipefail
+          python -m pip install -e . 2>&1 | tee logs/install.log
+          python -m pip freeze > logs/installed_packages.txt
+      - name: Record exact environment
+        run: |
+          python - <<'PY' | tee logs/versions.txt
+          import jax
+          import importlib.metadata as m
+          print('JAX backend:', jax.default_backend())
+          for p in ['jax','jaxlib','flax','chex','jaxmarl','gymnax','optax','numpy']:
+              print(p, m.version(p))
+          PY
+      - name: Run one official random-baseline task
+        run: |
+          set -o pipefail
+          python eval_icrl.py \
+            --algo random \
+            --tracks teammate \
+            --layout demo_cook_simple \
+            --teammate territory \
+            --episodes 1 \
+            --max_tasks_per_track 1 \
+            --max_steps 100 \
+            --seed 0 \
+            --gpu -1 \
+            --parallel_batch_size 1 \
+            --out results_smoke \
+            2>&1 | tee logs/smoke_run.log
+      - name: Validate official result JSON
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          found=[]
+          for f in Path('results_smoke').rglob('*.json'):
+              try:
+                  j=json.loads(f.read_text())
+                  if all(k in j for k in ['task_id','mean_return','algorithm','num_episodes','schema_version']):
+                      found.append(j)
+              except Exception:
+                  pass
+          print('Confirmed TaskResult files:',len(found))
+          if not found:
+              raise RuntimeError('No official TaskResult JSON produced')
+          for j in found:
+              print(j['task_id'], 'mean_return',j['mean_return'])
+          PY
+      - name: Upload diagnostic and result artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icrl-cpu-smoke-logs
+          path: |
+            logs/**
+            results_smoke/**
+          if-no-files-found: warn
