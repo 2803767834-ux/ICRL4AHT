@@ -1,0 +1,83 @@
+name: ICRL4AHT Round8 Extended Baselines
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/icrl_round8.yml
+permissions:
+  contents: read
+jobs:
+  extended_baselines:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 100
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Use pinned CPU JAX and install
+        run: |
+          mkdir -p logs
+          python - <<'PY'
+          from pathlib import Path
+          p=Path("pyproject.toml")
+          s=p.read_text()
+          assert s.count('"jax[cuda12]==0.5.3"')==1
+          p.write_text(s.replace('"jax[cuda12]==0.5.3"','"jax==0.5.3"'))
+          PY
+          set -o pipefail
+          python -m pip install -e . 2>&1 | tee logs/install.log
+          python -m pip freeze > logs/freeze.txt
+      - name: Run official random baseline (all 4 partner types; 2 layouts)
+        run: |
+          set -o pipefail
+          python eval_icrl.py --algo random --tracks teammate --layout demo_cook_simple,grounded_coord_ring --teammate assembly_line,territory,utility_greedy,recipe_aware_button --episodes 3 --num_seeds 2 --max_steps 100 --parallel_batch_size 2 --gpu -1 --out results_round8_random 2>&1 | tee logs/random.log
+      - name: Require exact official result coverage
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          paths=list(Path("results_round8_random").glob("seed_*/random/teammate/*/*/*.json"))
+          expected=2*2*4*5
+          print("Official task results:",len(paths),"expected:",expected)
+          assert len(paths)==expected
+          for path in paths:
+              j=json.loads(path.read_text())
+              assert j["num_episodes"]==3 and j["algorithm"]=="random"
+              assert len(j["per_episode"])==3
+          PY
+      - name: Run fixed heuristic ego cross-play research extension
+        run: |
+          set -o pipefail
+          python scripts/round8_static_crossplay.py --layouts demo_cook_simple,grounded_coord_ring --partners assembly_line,territory,utility_greedy,recipe_aware_button --ego utility_greedy,recipe_aware_button --seeds 0,1 --tasks-per-cell 2 --episodes 3 --max-steps 100 --out results_round8_crossplay.csv 2>&1 | tee logs/crossplay.log
+      - name: Validate cross-play matrix and summarize
+        run: |
+          python - <<'PY'
+          import csv,collections,json
+          from pathlib import Path
+          rows=list(csv.DictReader(open("results_round8_crossplay.csv")))
+          assert len(rows)==2*4*2*2*2*3,(len(rows))
+          pairs=collections.defaultdict(list)
+          for r in rows:
+              pairs[(r["layout"],r["ego_family"],r["partner_family"])].append(float(r["return"]))
+          assert len(pairs)==2*2*4
+          summary=[dict(layout=k[0],ego=k[1],partner=k[2],n=len(v),mean_return=sum(v)/len(v),success_rate=sum(x>0 for x in v)/len(v)) for k,v in sorted(pairs.items())]
+          Path("round8_summary.json").write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          PY
+      - name: Upload all results including errors
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icrl-round8-results
+          path: |
+            logs/**
+            results_round8_random/**
+            results_round8_crossplay.csv
+            round8_summary.json
+          if-no-files-found: warn
